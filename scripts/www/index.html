@@ -10,7 +10,7 @@
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
-    <!-- SheetJS for Excel parsing -->
+    <!-- SheetJS for Excel parsing (使用稳定的CDN) -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <!-- html2canvas for chart export -->
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
@@ -549,9 +549,9 @@
                 setAnalysisMode('column');
             });
             
-            // 调用数据范围事件绑定函数
-            bindDataRangeEvents();
+            // XLSX库检查已移除，让应用正常初始化
             
+            // 调用数据范围事件绑定函数
             bindDataRangeEvents();
             
             // 图表类型切换
@@ -616,19 +616,21 @@
                 lastModified: file.lastModified
             });
             
-            // 检查文件扩展名
+            // 兼容电脑端和移动端的文件类型检测
             const fileName = file.name.toLowerCase();
-            const validExtensions = ['.xlsx', '.xls'];
+            const validExtensions = ['.xlsx', '.xls', '.xlsm', '.xltx', '.xlt'];
             
-            // 宽松的扩展名检查
-            const hasValidExtension = validExtensions.some(ext => fileName.includes(ext));
+            // 检查文件扩展名（支持更宽松的匹配）
+            const hasValidExtension = validExtensions.some(ext => 
+                fileName.endsWith(ext) || fileName.includes(ext)
+            );
             
             if (!hasValidExtension) {
-                showErrorModal('不支持的文件格式。请上传Excel文件(.xlsx或.xls)');
+                showErrorModal('不支持的文件格式。请上传Excel文件(.xlsx, .xls等)');
                 return;
             }
             
-            // 检查文件大小（限制为20MB）
+            // 检查文件大小（恢复电脑端更大的限制）
             const maxSize = 20 * 1024 * 1024; // 20MB
             if (file.size > maxSize) {
                 showErrorModal('文件过大。最大支持20MB的文件');
@@ -647,6 +649,7 @@
             // 更新应用状态
             updateAppStatus('正在处理文件: ' + file.name);
             
+            // 创建FileReader并增强错误处理
             const reader = new FileReader();
             
             // 设置超时处理
@@ -654,7 +657,21 @@
                 reader.abort();
                 hideLoading();
                 showErrorModal('文件读取超时。文件可能过大或格式不正确');
-            }, 30000); // 30秒超时
+            }, 60000); // 增加到60秒超时，适应大文件
+            
+            // 添加错误处理
+            reader.onerror = function(error) {
+                clearTimeout(timeoutId);
+                hideLoading();
+                console.error('文件读取错误:', error);
+                showErrorModal('文件读取失败。请检查文件是否损坏或尝试重新上传');
+            };
+            
+            reader.onabort = function() {
+                clearTimeout(timeoutId);
+                hideLoading();
+                console.warn('文件读取被中止');
+            };
             
             reader.onload = function(e) {
                 clearTimeout(timeoutId);
@@ -662,13 +679,79 @@
                 try {
                     updateAppStatus('正在解析Excel数据...');
                     
-                    const data = new Uint8Array(e.target.result);
-                    const workbook = XLSX.read(data, { 
-                        type: 'array',
-                        cellDates: true,
-                        cellNF: false,
-                        cellText: false
-                    });
+                    // 兼容电脑端和移动端的数据处理
+                    let data = e.target.result;
+                    console.log('读取到的数据类型:', typeof data);
+                    
+                    // 确保数据格式正确
+                    if (typeof data === 'string') {
+                        // 如果是字符串，转换为二进制
+                        const binaryString = data;
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) {
+                            bytes[i] = binaryString.charCodeAt(i) & 0xFF;
+                        }
+                        data = bytes;
+                    } else if (data instanceof ArrayBuffer) {
+                        data = new Uint8Array(data);
+                    }
+                    
+                    console.log('处理后的数据类型:', data.constructor.name, '长度:', data.length);
+                    
+                    // 电脑端和移动端通用的解析选项
+                    let workbook;
+                    try {
+                        // 简化解析选项，使用最基本的配置
+                        console.log('开始解析Excel文件...');
+                        
+                        // 根据数据类型自动选择正确的解析方式
+                        const readOptions = {
+                            cellDates: true,
+                            cellNF: false,
+                            cellText: false,
+                            raw: false
+                        };
+                        
+                        // 确保数据格式正确
+                        if (data instanceof Uint8Array) {
+                            workbook = XLSX.read(data, readOptions);
+                        } else if (data instanceof ArrayBuffer) {
+                            workbook = XLSX.read(new Uint8Array(data), readOptions);
+                        } else {
+                            workbook = XLSX.read(data, readOptions);
+                        }
+                        
+                        // 验证workbook对象
+                        if (!workbook) {
+                            throw new Error('解析失败：workbook为null或undefined');
+                        }
+                        
+                        if (typeof workbook !== 'object') {
+                            throw new Error(`解析失败：workbook类型错误，期望object，实际为${typeof workbook}`);
+                        }
+                        
+                        // 检查必要的属性
+                        if (!Array.isArray(workbook.SheetNames)) {
+                            throw new Error('解析失败：workbook.SheetNames不是数组');
+                        }
+                        
+                        if (typeof workbook.Sheets !== 'object') {
+                            throw new Error('解析失败：workbook.Sheets不是对象');
+                        }
+                        
+                        console.log('Workbook解析成功:', {
+                            SheetNames: workbook.SheetNames,
+                            SheetCount: workbook.SheetNames.length,
+                            Sheets: Object.keys(workbook.Sheets)
+                        });
+                        
+                    } catch (error) {
+                        console.error('Excel解析错误:', error);
+                        console.error('错误堆栈:', error.stack);
+                        hideLoading();
+                        showErrorModal(`Excel文件解析失败: ${error.message}`);
+                        return;
+                    }
                     
                     // 检查是否有工作表
                     if (workbook.SheetNames.length === 0) {
@@ -677,13 +760,47 @@
                         return;
                     }
                     
+                    // 安全获取第一个工作表
                     const sheetName = workbook.SheetNames[0];
+                    if (!sheetName) {
+                        hideLoading();
+                        showErrorModal('Excel文件不包含任何工作表');
+                        return;
+                    }
+                    
                     const worksheet = workbook.Sheets[sheetName];
+                    if (!worksheet) {
+                        hideLoading();
+                        showErrorModal(`无法访问工作表 '${sheetName}'`);
+                        return;
+                    }
+                    
+                    console.log('成功访问工作表:', sheetName);
                     
                     updateAppStatus('正在转换数据格式...');
                     
-                    // 转换为二维数组
-                    const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                    // 电脑端和移动端通用的数据转换
+                    let rawData;
+                    try {
+                        // 方法1：标准转换
+                        rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                        console.log('标准转换成功，数据行数:', rawData?.length);
+                        
+                        // 确保数据有效
+                        if (!rawData || rawData.length === 0) {
+                            throw new Error('标准转换返回空数据');
+                        }
+                    } catch (error) {
+                        console.warn('标准转换失败，尝试备用方法:', error.message);
+                        // 方法2：备用转换
+                        rawData = XLSX.utils.sheet_to_json(worksheet, { 
+                            header: 1,
+                            range: 0,
+                            defval: '',
+                            raw: false
+                        });
+                        console.log('备用转换成功，数据行数:', rawData?.length);
+                    }
                     
                     // 验证数据格式
                     if (!rawData || rawData.length === 0) {
@@ -692,11 +809,14 @@
                         return;
                     }
                     
-                    if (rawData.length < 2 || rawData[0].length < 2) {
+                    // 标准数据验证（恢复更合理的验证规则）
+                    if (rawData.length < 2 || (rawData[0] && rawData[0].length < 2)) {
                         hideLoading();
                         showErrorModal('Excel文件数据格式不正确，至少需要2行2列数据');
                         return;
                     }
+                    
+                    console.log('数据验证通过，开始解析');
                     
                     // 检查是否有有效数据
                     let hasValidData = false;
